@@ -1,19 +1,12 @@
-if(concepts)
-add_subdirectory(concepts)
-endif(concepts)
-
-if(WIN32)
-  set(is_windows .true.)
-else()
-  set(is_windows .false.)
-endif()
-configure_file(pathlib.in.f90 pathlib.f90 @ONLY)
-
-add_subdirectory(read)
-
-add_subdirectory(write)
-
+set(s ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_sources(h5fortran PRIVATE
-interface.f90 attributes.f90
-${CMAKE_CURRENT_BINARY_DIR}/pathlib.f90)
+${s}/utils.f90 ${s}/datatype.f90 ${s}/deflate.f90
+${s}/read.f90 ${s}/read_scalar.f90 ${s}/read_ascii.f90 ${s}/reader.f90
+${s}/write.f90 ${s}/write_scalar.f90 ${s}/writer.f90
+${s}/reader_lt.f90 ${s}/writer_lt.f90
+${s}/interface.f90
+${s}/attr.f90
+${s}/attr_read.f90
+${s}/attr_write.f90
+)

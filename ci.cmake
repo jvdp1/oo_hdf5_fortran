@@ -1,212 +1,165 @@
-cmake_minimum_required(VERSION 3.15...3.20)
+cmake_minimum_required(VERSION 3.20)
 
 set(CTEST_PROJECT_NAME "h5fortran")
 
-set(CTEST_LABELS_FOR_SUBPROJECTS "unit;core;shaky")
+set(opts
+-DCMAKE_COMPILE_WARNING_AS_ERROR:BOOL=ON
+)
 
-set(opts)
+option(submit "use CDash upload" true)
 
-# --- boilerplate follows
+# --- main script
 
 set(CTEST_NIGHTLY_START_TIME "01:00:00 UTC")
 set(CTEST_SUBMIT_URL "https://my.cdash.org/submit.php?project=${CTEST_PROJECT_NAME}")
 
-# ctest -S doesn't have a way to pass -Dvar:type=value, so do this via env var
-# cannot pass in lists--use CMakePresets.json for list variables. Example:
-# ctest --preset=my1 -S setup.cmake
-list(APPEND opts $ENV{CTEST_${CTEST_PROJECT_NAME}_ARGS})
-
-# --- Experimental, Nightly, Continuous
-# https://cmake.org/cmake/help/latest/manual/ctest.1.html#dashboard-client-modes
-if(NOT CTEST_MODEL)
-  if(DEFINED ENV{CTEST_MODEL})
-    set(CTEST_MODEL $ENV{CTEST_MODEL})
-  endif()
-endif()
-if(NOT CTEST_MODEL)
-  if(DEFINED ENV{CI})
-    set(CI $ENV{CI})
-    if(CI)
-      set(CTEST_MODEL "Nightly")
-    endif()
-  endif()
-endif()
 if(NOT CTEST_MODEL)
   set(CTEST_MODEL "Experimental")
 endif()
 
 # --- other defaults
 set(CTEST_TEST_TIMEOUT 10)
+
+set(CTEST_USE_LAUNCHERS true)
 set(CTEST_OUTPUT_ON_FAILURE true)
+set(CTEST_START_WITH_EMPTY_BINARY_DIRECTORY_ONCE true)
 
 set(CTEST_SOURCE_DIRECTORY ${CTEST_SCRIPT_DIRECTORY})
 if(NOT DEFINED CTEST_BINARY_DIRECTORY)
   set(CTEST_BINARY_DIRECTORY ${CTEST_SOURCE_DIRECTORY}/build)
 endif()
 
-if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE RelWithDebInfo)
-endif()
-list(APPEND opts -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})
-
-if(NOT DEFINED CTEST_SITE)
-  if(DEFINED ENV{CTEST_SITE})
-    set(CTEST_SITE $ENV{CTEST_SITE})
-  else()
-    cmake_host_system_information(RESULT sys_name QUERY OS_NAME OS_RELEASE OS_VERSION)
-    string(REPLACE ";" " " sys_name ${sys_name})
-    set(CTEST_SITE ${sys_name})
-  endif()
+if(NOT DEFINED CTEST_SITE AND DEFINED ENV{CTEST_SITE})
+  set(CTEST_SITE $ENV{CTEST_SITE})
 endif()
 
 find_program(GIT_EXECUTABLE NAMES git REQUIRED)
 
-if(NOT DEFINED CTEST_BUILD_NAME)
-  if(DEFINED ENV{CTEST_BUILD_NAME})
-    set(CTEST_BUILD_NAME $ENV{CTEST_BUILD_NAME})
-  else()
-    execute_process(COMMAND ${GIT_EXECUTABLE} describe --tags
-      WORKING_DIRECTORY ${CTEST_SOURCE_DIRECTORY}
-      OUTPUT_VARIABLE git_rev OUTPUT_STRIP_TRAILING_WHITESPACE
-      RESULT_VARIABLE _err)
-    if(NOT _err EQUAL 0)
-      # old Git
-      execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
-        WORKING_DIRECTORY ${CTEST_SOURCE_DIRECTORY}
-        OUTPUT_VARIABLE git_rev OUTPUT_STRIP_TRAILING_WHITESPACE
-        RESULT_VARIABLE _err)
-    endif()
-    if(_err EQUAL 0)
-      set(CTEST_BUILD_NAME ${git_rev})
-    endif()
+# --- CTEST_BUILD_NAME is used by ctest_submit(); must be set before ctest_start()
+
+if(NOT CTEST_BUILD_NAME)
+  execute_process(COMMAND ${GIT_EXECUTABLE} describe --tags
+  WORKING_DIRECTORY ${CTEST_SOURCE_DIRECTORY}
+  OUTPUT_VARIABLE git_rev OUTPUT_STRIP_TRAILING_WHITESPACE
+  RESULT_VARIABLE ret
+  )
+  if(ret EQUAL 0)
+    set(CTEST_BUILD_NAME ${git_rev})
   endif()
 endif()
 
 
-set(CTEST_USE_LAUNCHERS 1)
-
-# --- find generator
 function(find_generator)
 
-if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.17)
-  find_program(ninja NAMES ninja ninja-build samu)
-
-  if(ninja)
-    execute_process(COMMAND ${ninja} --version
-      OUTPUT_VARIABLE ninja_version OUTPUT_STRIP_TRAILING_WHITESPACE
-      RESULT_VARIABLE err
-      TIMEOUT 5)
-    if(err EQUAL 0 AND ninja_version VERSION_GREATER_EQUAL 1.10)
-      set(CTEST_CMAKE_GENERATOR Ninja)
-    endif()
-  endif(ninja)
+if(NOT CTEST_CMAKE_GENERATOR AND DEFINED ENV{CMAKE_GENERATOR})
+  set(CTEST_CMAKE_GENERATOR $ENV{CMAKE_GENERATOR} PARENT_SCOPE)
+  return()
+  # return here as if(...) wouldn't detect it in parent_scope
+endif()
+if(CTEST_CMAKE_GENERATOR)
+  return()
 endif()
 
-if(NOT DEFINED CTEST_CMAKE_GENERATOR)
-  set(CTEST_BUILD_FLAGS -j)  # not --parallel as this goes to generator directly
-  if(WIN32)
-    set(CTEST_CMAKE_GENERATOR "MinGW Makefiles")
-  else()
-    set(CTEST_CMAKE_GENERATOR "Unix Makefiles")
-  endif()
-endif()
+find_program(ninja NAMES ninja ninja-build samu)
 
-set(CTEST_CMAKE_GENERATOR ${CTEST_CMAKE_GENERATOR} PARENT_SCOPE)
+if(ninja)
+  set(CTEST_CMAKE_GENERATOR "Ninja" PARENT_SCOPE)
+elseif(WIN32)
+  set(CTEST_CMAKE_GENERATOR "MinGW Makefiles" PARENT_SCOPE)
+else()
+  set(CTEST_CMAKE_GENERATOR "Unix Makefiles" PARENT_SCOPE)
+endif()
 
 endfunction(find_generator)
 
-if(NOT DEFINED CTEST_CMAKE_GENERATOR)
-  if(DEFINED ENV{CMAKE_GENERATOR})
-    set(CTEST_CMAKE_GENERATOR $ENV{CMAKE_GENERATOR})
-  else()
-    find_generator()
-  endif()
-endif()
-
-# --- test parallelism
-include(ProcessorCount)
-
-function(cmake_cpu_count)
-  # on ARM e.g. Raspberry Pi, the usually reliable cmake_host_system_info gives 1 instead of true count
-  # fallback to less reliable ProcessorCount which does work on Raspberry Pi.
-  ProcessorCount(_ncount)
-  cmake_host_system_information(RESULT Ncpu QUERY NUMBER_OF_PHYSICAL_CORES)
-
-  if(Ncpu EQUAL 1 AND _ncount GREATER 0)
-    set(Ncpu ${_ncount})
-  endif()
-
-  set(Ncpu ${Ncpu} PARENT_SCOPE)
-
-endfunction(cmake_cpu_count)
-cmake_cpu_count()
+find_generator()
 
 # --- CTest Dashboard
 
-set(CTEST_NOTES_FILES "${CTEST_SCRIPT_DIRECTORY}/${CTEST_SCRIPT_NAME}")
-set(CTEST_SUBMIT_RETRY_COUNT 3)
+set(CTEST_SUBMIT_RETRY_COUNT 2)
 # avoid auto-detect version control failures on some systems
 set(CTEST_UPDATE_TYPE git)
 set(CTEST_UPDATE_COMMAND git)
 
 ctest_start(${CTEST_MODEL})
 
-if(CTEST_MODEL STREQUAL Nightly OR CTEST_MODEL STREQUAL Continuous)
+if(CTEST_MODEL MATCHES "(Nightly|Continuous)")
   # this erases local code changes i.e. anything not "git push" already is lost forever!
   # we try to avoid that by guarding with a Git porcelain check
   execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain
-    WORKING_DIRECTORY ${CTEST_SOURCE_DIRECTORY}
-    OUTPUT_VARIABLE _ret OUTPUT_STRIP_TRAILING_WHITESPACE
-    RESULT_VARIABLE _err)
-  if(NOT _err EQUAL 0)
-    message(FATAL_ERROR "CTest could not check Git porcelain status")
-  endif()
-  if(_ret)
-    message(WARNING "CTest would have erased the non-Git Push'd changes, NOT updating.")
+  WORKING_DIRECTORY ${CTEST_SOURCE_DIRECTORY}
+  TIMEOUT 5
+  OUTPUT_VARIABLE ret OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY
+  )
+  if(ret)
+    message(FATAL_ERROR "CTest would have erased the non-Git Push'd changes.")
   else()
-    ctest_update(RETURN_VALUE _ret)
-    if(_ret EQUAL 0 AND CTEST_MODEL STREQUAL Continuous)
-      message(STATUS "No Git-updated files, so no need to test in CTest Model ${CTEST_MODEL}. CTest stopping.")
+    ctest_update(
+    RETURN_VALUE ret
+    CAPTURE_CMAKE_ERROR err
+    )
+    if(ret LESS 0 OR NOT err EQUAL 0)
+      message(FATAL_ERROR "Update failed: return ${ret} cmake return ${err}")
+    endif()
+    if(ret EQUAL 0 AND CTEST_MODEL STREQUAL "Continuous")
+      message(NOTICE "No Git-updated files -> no need to test in CTest Model ${CTEST_MODEL}. CTest stopping.")
       return()
     endif()
+
   endif()
 endif()
 
+# --- configure
+
 ctest_configure(
-  OPTIONS "${opts}"
-  RETURN_VALUE _ret
-  CAPTURE_CMAKE_ERROR _err)
-ctest_submit(PARTS Configure)
-if(NOT (_ret EQUAL 0 AND _err EQUAL 0))
-  message(FATAL_ERROR "Configure failed.")
+OPTIONS "${opts}"
+RETURN_VALUE ret
+CAPTURE_CMAKE_ERROR err
+)
+if(NOT (ret EQUAL 0 AND err EQUAL 0))
+  if(submit)
+    ctest_submit(BUILD_ID build_id)
+  endif()
+  message(FATAL_ERROR "Configure ${build_id} failed: return ${ret} cmake return ${err}")
+endif()
+
+if(DEFINED ENV{CMAKE_BUILD_PARALLEL_LEVEL})
+  set(Ncpu $ENV{CMAKE_BUILD_PARALLEL_LEVEL})
+else()
+  cmake_host_system_information(RESULT Ncpu QUERY NUMBER_OF_PHYSICAL_CORES)
 endif()
 
 ctest_build(
-  RETURN_VALUE _ret
-  CAPTURE_CMAKE_ERROR _err)
-ctest_submit(PARTS Build)
-if(NOT (_ret EQUAL 0 AND _err EQUAL 0))
-  message(FATAL_ERROR "Build failed.")
+PARALLEL_LEVEL ${Ncpu}
+RETURN_VALUE ret
+CAPTURE_CMAKE_ERROR err
+)
+if(NOT (ret EQUAL 0 AND err EQUAL 0))
+  if(submit)
+    ctest_submit(BUILD_ID build_id)
+  endif()
+  message(FATAL_ERROR "Build ${build_id} failed: return ${ret} cmake return ${err}")
+endif()
+
+if(DEFINED ENV{CTEST_PARALLEL_LEVEL})
+  set(Ntest $ENV{CTEST_PARALLEL_LEVEL})
+else()
+  set(Ntest ${Ncpu})
 endif()
 
 ctest_test(
-  # set PARALLEL_LEVEL here as the global option seems to be ignored
-  PARALLEL_LEVEL ${Ncpu}
-  # specify BUILD to avoid random return 255 despite tests passing
-  BUILD ${CTEST_BINARY_DIRECTORY}
-  SCHEDULE_RANDOM ON
-  REPEAT UNTIL_PASS:3
-  RETURN_VALUE _ret
-  CAPTURE_CMAKE_ERROR _err
-  )
-ctest_submit(PARTS Test)
+SCHEDULE_RANDOM true
+PARALLEL_LEVEL ${Ntest}
+RETURN_VALUE ret
+CAPTURE_CMAKE_ERROR err
+)
 
-ctest_submit(
-  PARTS Done
-  BUILD_ID build_id)
-
-if(NOT (_ret EQUAL 0 AND _err EQUAL 0))
-  message(FATAL_ERROR "Build ${build_id} failed: CTest code ${_ret}, CMake code ${_err}.")
+if(submit)
+  ctest_submit(BUILD_ID build_id)
+endif()
+if(NOT (ret EQUAL 0 AND err EQUAL 0))
+  message(FATAL_ERROR "Test ${build_id} failed: CTest code ${ret}, CMake code ${err}.")
 endif()
 
 message(STATUS "OK: CTest build ${build_id}")

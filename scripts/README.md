@@ -1,6 +1,7 @@
 # Build HDF5 scripts
 
-Here we use a dummy CMake project to reuse code from the main h5fortran project to build HDF5 and ZLIB.
+This folder can build HDF5 and ZLIB.
+Pick CMAKE_INSTALL_PREFIX to be the directory you wish to install HDF5 under.
 
 ```sh
 cmake -B build -DCMAKE_INSTALL_PREFIX=~/local
@@ -14,8 +15,19 @@ cmake -B build -DCMAKE_INSTALL_PREFIX=~/local -Dhdf5_parallel=on
 cmake --build build
 ```
 
-## compiler scripts
+Optionally, request a specific
+[HDF5 release URL source archive](https://github.com/HDFGroup/hdf5/releases)
+and/or ZLIB URL source archive URL:
 
-The "h5fc" and "h5cc" will be installed above under ~/local/bin.
-These only appear on Linux and MacOS.
-The HDF5 build system doesn't yet build these compiler wrappers on Windows.
+```sh
+cmake -B build \
+  -Dhdf5_url=https://github.com/HDFGroup/hdf5/archive/refs/tags/hdf5_1.14.4.3.tar.gz \
+  -Dzlib_url=https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.2.1.tar.gz
+```
+
+## compiler wrappers
+
+The HDF5 compiler wrappers will be installed under the install_prefix/bin for macOS and Linux.
+
+* non-MPI (default): `h5cc` (C), `h5fc` (Fortran)
+* MPI: `h5pcc` (C), `h5pfc` (Fortran)

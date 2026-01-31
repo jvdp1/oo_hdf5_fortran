@@ -1,19 +1,28 @@
 name: ci_windows
+
 env:
+  CTEST_NO_TESTS_ACTION: error
+  CTEST_PARALLEL_LEVEL: 0
   CMAKE_GENERATOR: Ninja
-  CTEST_PARALLEL_LEVEL: 4
-  CMAKE_BUILD_TYPE: Release
 
 on:
   push:
     paths:
+      - "**.c"
+      - "**.cpp"
+      - "**.f90"
+      - "**.F90"
       - "**/CMakeLists.txt"
       - "**.cmake"
       - ".github/workflows/ci_windows.yml"
-  pull_request:
-  release:
-    types: [published]
+      - "!memcheck.cmake"
+      - "!coverage.cmake"
+  workflow_dispatch:
 
+# avoid wasted runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
 
@@ -21,111 +30,48 @@ jobs:
     timeout-minutes: 30
     runs-on: windows-latest
 
-    defaults:
-      run:
-        shell: msys2 {0}
+    # Windows needs these defined within the job. $HOME doesn't work nor does ~.
+    env:
+      CMAKE_INSTALL_PREFIX: libs
+      CMAKE_PREFIX_PATH: libs
+
     steps:
     - uses: msys2/setup-msys2@v2
+      id: msys2
       with:
         update: true
         install: >-
-          git
-          mingw-w64-x86_64-cmake
-          mingw-w64-x86_64-ninja
-          mingw-w64-x86_64-gcc-fortran
-          mingw-w64-x86_64-hdf5
-    # cmake install needed because of default to msys2 shell
+          mingw-w64-ucrt-x86_64-gcc-fortran
+          mingw-w64-ucrt-x86_64-hdf5
 
-    - uses: actions/checkout@v2
+    - name: Put MSYS2_MinGW64 on PATH
+      run: echo "${{ steps.msys2.outputs.msys2-location }}/ucrt64/bin/" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-    - run: cmake --preset multi --install-prefix=${HOME}
-    - run: cmake --build --preset debug
-    - run: ctest --preset debug
+    - uses: actions/checkout@v6
 
-    - run: cmake --build --preset release
-    - run: ctest --preset release
-
-    - run: cmake --install build
-
-    - name: configure examples (static)
-      run: cmake -S Examples -B Examples/build -Dh5fortran_ROOT=${HOME}
-    - name: build Examples (static)
-      run: cmake --build Examples/build
-    - name: Test Examples (static)
-      run: ctest --test-dir Examples/build -V
-
-   # shared build (saving time rather than use new CI image)
-    - run: cmake -B build-shared -DBUILD_SHARED_LIBS:BOOL=true --install-prefix=${HOME}/shared
-    - run: cmake --build build-shared
-    - run: ctest --test-dir build-shared --preset default
-    - run: cmake --install build-shared
-
-    - name: configure examples (shared)
-      run: cmake -S Examples -B Examples/build-shared -Dh5fortran_ROOT=${HOME}/shared
-    - name: build Examples (shared)
-      run: cmake --build Examples/build-shared
-  # this works on my Windows computers but not on CI.
-  # FIXME: use CMake 3.22 ENVIRONMENT_MODIFICATION
-    # - name: Test Examples (shared)
-    #   run: ctest --test-dir Examples/build-shared -V
-
-# --- package
-    - name: create package
-      if: github.event.action == 'published'
-      run: cpack --config build/CPackConfig.cmake
-
-    - name: Upload artifact
-      if: github.event.action == 'published'
-      uses: actions/upload-artifact@v1
-      with:
-        name: binary-archive
-        path: build/package
-
-    - name: get version
-      if: github.event.action == 'published'
-      id: get_version
-      run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\/v/}
-
-    - name: Upload release asset
-      if: github.event.action == 'published'
-      uses: actions/upload-release-asset@v1
+    - name: config
+      run: cmake --preset default
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: build/package/h5fortran-${{ steps.get_version.outputs.VERSION }}-win64.tar.zst
-        asset_name:  h5fortran-${{ steps.get_version.outputs.VERSION }}-win64.tar.zst
-        asset_content_type: application/zip
+        HDF5_ROOT: ${{ steps.msys2.outputs.msys2-location }}/ucrt64/
 
+    - name: print config log
+      if: ${{ failure() }}
+      run: cat build/CMakeFiles/CMakeConfigureLog.yaml
 
-  msys2-build:
-    timeout-minutes: 30
-    runs-on: windows-latest
+    - name: Build
+      run: cmake --build --preset default
 
-    defaults:
-      run:
-        shell: msys2 {0}
-    steps:
-    - uses: msys2/setup-msys2@v2
-      with:
-        update: true
-        install: >-
-          git
-          mingw-w64-x86_64-cmake
-          mingw-w64-x86_64-ninja
-          mingw-w64-x86_64-gcc-fortran
-    # cmake install needed because of default to msys2 shell
+    - name: test
+      run: ctest --preset default
 
-    - uses: actions/checkout@v2
+    - name: install package
+      run: cmake --install build
 
-    # static build
-    - run: cmake -B build --preset build --install-prefix=${HOME}/static
-    - run: cmake --build build
-    - run: ctest --test-dir build --preset default
-    - run: cmake --install build
+    - name: example workflow
+      run: cmake -S example -B example/build -G Ninja
+      env:
+        HDF5_ROOT: ${{ steps.msys2.outputs.msys2-location }}/ucrt64/
 
-    # shared build (saving time rather than use new CI image)
-    - run: cmake -B build-shared --preset build -DBUILD_SHARED_LIBS:BOOL=true --install-prefix=${HOME}/shared
-    - run: cmake --build build-shared
-    - run: ctest --test-dir build-shared --preset default
-    - run: cmake --install build-shared
+    - run: cmake --build example/build
+
+    - run: ctest --test-dir example/build -V

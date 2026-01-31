@@ -1,107 +1,111 @@
-cmake_minimum_required(VERSION 3.20...3.22)
+cmake_minimum_required(VERSION 3.20...4.0)
 
-get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-if(NOT is_multi_config AND NOT (CMAKE_BUILD_TYPE OR DEFINED ENV{CMAKE_BUILD_TYPE}))
-  set(CMAKE_BUILD_TYPE Release CACHE STRING "Release default")
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+  message(FATAL_ERROR "Please do out of source build like
+  cmake -Bbuild")
 endif()
-
-file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/VERSION PROJECT_VERSION
-  REGEX "^([0-9]+\.[0-9]+\.[0-9]+)" LIMIT_INPUT 16 LENGTH_MAXIMUM 16 LIMIT_COUNT 1)
 
 project(h5fortran
 LANGUAGES C Fortran
-VERSION ${PROJECT_VERSION}
-DESCRIPTION "thin, light object-oriented HDF5 Fortran interface"
-HOMEPAGE_URL https://github.com/geospace-code/h5fortran
+VERSION 4.11.1
 )
 
 include(CTest)
-if(NOT DEFINED ${PROJECT_NAME}_BUILD_TESTING)
-  set(${PROJECT_NAME}_BUILD_TESTING ${BUILD_TESTING})
+
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+
+if(NOT DEFINED CRAY AND DEFINED ENV{PE_ENV})
+  set(CRAY true)
 endif()
 
-if(CMAKE_GENERATOR STREQUAL "Ninja Multi-Config")
-  set(EXTPROJ_GENERATOR "Ninja")
-else()
-  set(EXTPROJ_GENERATOR ${CMAKE_GENERATOR})
+if(CMAKE_VERSION VERSION_LESS 3.25 AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(LINUX true)
 endif()
 
-if(BUILD_SHARED_LIBS)
-  if(WIN32 AND CMAKE_VERSION VERSION_LESS 3.21 AND BUILD_TESTING)
-    message(STATUS "Windows with shared libs needs CMake >= 3.21 to run tests")
-  endif()
-  if(MSVC)
-    message(WARNING "Intel oneAPI has trouble with shared libs in general on Windows, try
-      cmake -DBUILD_SHARED_LIBS=off")
-  endif()
+# --- avoid Anaconda libraries
+if(h5fortran_python)
+  find_package(Python COMPONENTS Interpreter)
 endif()
 
-list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules)
+if(DEFINED ENV{CONDA_PREFIX} AND h5fortran_IGNORE_CONDA_LIBRARIES)
+  list(APPEND CMAKE_IGNORE_PREFIX_PATH $ENV{CONDA_PREFIX})
+  list(APPEND CMAKE_IGNORE_PATH $ENV{CONDA_PREFIX}/bin)
+  # need CMAKE_IGNORE_PATH for CMake < 3.23
+  # and to ensure system env var PATH doesn't interfere
+  # despite CMAKE_IGNORE_PREFIX_PATH
+endif()
 
-include(cmake/options.cmake)
+include(options.cmake)
 include(cmake/compilers.cmake)
+include(cmake/CheckHDF5.cmake)
 
-# --- find or build HDF5 library
-
-if(NOT hdf5_external)
-  if(autobuild)
-    find_package(HDF5 COMPONENTS Fortran HL)
-  else()
-    find_package(HDF5 REQUIRED COMPONENTS Fortran HL)
-  endif()
+if(NOT TARGET HDF5::HDF5 AND (h5fortran_find OR CRAY))
+  find_package(HDF5 COMPONENTS Fortran)
 endif()
 
-if(NOT HDF5_FOUND OR hdf5_external)
-  include(cmake/libraries.cmake)
-  include(cmake/build_hdf5.cmake)
+if(h5fortran_IS_TOP_LEVEL AND HDF5_FOUND)
+  check_hdf5()
+elseif(NOT TARGET HDF5::HDF5)
+  include(cmake/hdf5.cmake)
 endif()
 
-if(HDF5_VERSION VERSION_LESS 1.8.7)
-  message(WARNING "H5Fortran requires HDF5 >= 1.8.7")
-endif()
+set(HDF5_VERSION ${HDF5_VERSION} CACHE STRING "HDF5 version")
 
-if(hdf5_parallel OR HDF5_HAVE_PARALLEL)
-  find_package(MPI COMPONENTS Fortran REQUIRED)
+if(h5fortran_IS_TOP_LEVEL AND (hdf5_parallel OR HDF5_HAVE_PARALLEL))
   target_link_libraries(HDF5::HDF5 INTERFACE MPI::MPI_Fortran)
+endif()
+
+# HDF5 bug #3663 for HDF5 1.14.2..5, ...?
+# https://github.com/HDFGroup/hdf5/issues/3663
+if(WIN32 AND CMAKE_Fortran_COMPILER_ID MATCHES "^Intel")
+if(HDF5_VERSION MATCHES "1.14.[2-6]")
+  message(STATUS "HDF5: applying workaround for HDF5 bug #3663 with Intel oneAPI on Windows")
+  target_link_libraries(HDF5::HDF5 INTERFACE shlwapi)
+endif()
 endif()
 
 # --- h5fortran library
 
 add_library(h5fortran)
-target_include_directories(h5fortran
-PUBLIC
+target_include_directories(h5fortran PUBLIC
 $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
 $<INSTALL_INTERFACE:include>
 )
 target_link_libraries(h5fortran PUBLIC HDF5::HDF5)
-set_target_properties(h5fortran PROPERTIES
-Fortran_MODULE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include
-LABELS core
-VERSION ${PROJECT_VERSION}
-)
+set_property(TARGET h5fortran PROPERTY Fortran_MODULE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include)
+set_property(TARGET h5fortran PROPERTY VERSION ${PROJECT_VERSION})
 
-# GLOBAL needed for use by FetchContent
+# GLOBAL needed for use by parent projects
 add_library(h5fortran::h5fortran INTERFACE IMPORTED GLOBAL)
 target_link_libraries(h5fortran::h5fortran INTERFACE h5fortran)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/include)
+# avoid race condition when used by parent projects
 
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/include/h5fortran.mod TYPE INCLUDE)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/include/h5fortran.mod DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
-install(TARGETS h5fortran EXPORT ${PROJECT_NAME}-targets)
+install(TARGETS h5fortran EXPORT h5fortran-targets)
 
 add_subdirectory(src)
 
-if(${PROJECT_NAME}_BUILD_TESTING)
-  add_subdirectory(src/tests)
+get_property(_h5f_defs TARGET h5fortran PROPERTY COMPILE_DEFINITIONS)
+message(VERBOSE "h5fortran COMPILE_DEFINITIONS: ${_h5f_defs}")
+get_property(_h5f_flags TARGET h5fortran PROPERTY COMPILE_OPTIONS)
+message(VERBOSE "h5fortran COMPILE_OPTIONS: ${_h5f_flags}")
+get_property(_h5f_libs TARGET h5fortran PROPERTY LINK_LIBRARIES)
+message(VERBOSE "h5fortran LINK_LIBRARIES: ${_h5f_libs}")
+
+
+if(h5fortran_BUILD_TESTING)
+  add_subdirectory(test)
 endif()
 
 # additional Find*.cmake necessary
 install(FILES
-${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindHDF5.cmake
-${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindSZIP.cmake
+${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindHDF5.cmake
 DESTINATION cmake
 )
 
 include(cmake/pkgconf.cmake)
 include(cmake/install.cmake)
 
-include(cmake/summary.cmake)
+file(GENERATE OUTPUT .gitignore CONTENT "*")

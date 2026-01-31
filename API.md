@@ -2,6 +2,8 @@
 
 This document provides a listing of h5fortran `public` scoped user-facing procedures and methods with a summary of their parameters.
 
+Reading or writing {real64,real32,int32,int64} from scalar to 7d is supported.
+
 All examples assume:
 
 ```fortran
@@ -11,7 +13,48 @@ use hdf5, only: HSIZE_T, HID_T
 type(hdf5_file) :: h
 ```
 
-## Open / close HDF5 file reference
+Query HDF5 library version:
+
+```fortran
+use h5fortran, only : hdf5version
+print *, hdf5version()
+```
+
+## Character variables
+
+Character variables are also supported for datasets and attributes.
+On some compilers (e.g. oneAPI), it's more stable to use an auxiliary variable when writing character data to avoid "junk" in the string.
+
+For example:
+
+```fortran
+character(5) :: aux
+
+aux = "hello"
+
+h%write("/mystr", aux)
+```
+
+rather than simply
+
+```fortran
+h%write("/mystr", "hello")
+```
+
+This is ESPECIALLY true if writing empty character to a dataset or attribute:
+
+```fortran
+
+h%write("/mystr", "")  !< DON'T: may have junk characters in file
+
+
+!! instead do like:
+character(123) :: aux  !< arbitrary length
+aux = ""
+h%write("/mystr", aux)
+```
+
+## Open HDF5 file reference
 
 More than one HDF5 file can be open in a program, by declaring unique file handle (variable) like:
 
@@ -20,37 +63,33 @@ type(hdf5_file) :: h1, h2, h3
 ```
 
 ```fortran
-call h%open(filename,ierr, action,comp_lvl,verbose,debug)
+call h % open(filename, action, comp_lvl)
 !! Opens hdf5 file
 
 character(*), intent(in) :: filename
-integer, intent(out), optional :: ierr  !< 0 if OK
-character(*), intent(in), optional :: action  !< r, w, rw
+character(*), intent(in), optional :: action  !< 'r', 'r+', 'w', 'rw'  (default 'r')
 integer, intent(in), optional      :: comp_lvl  !< 0: no compression. 1-9: ZLIB compression, higher is more compressior
-logical, intent(in), optional      :: verbose, debug
 ```
 
+## Close HDF5 file reference
+
 ```fortran
-call h%close(ierr, close_hdf5_interface)
-!! This must be called on each HDF5 file to flush buffers to disk
+call h%close(close_hdf5_interface)
+!! This must be called on each open file to flush buffers to disk
 !! data loss can occur if program terminates before this procedure
 !!
-!! We don't reference count because applications might also invoke HDF5
-!! directly.
 !! close_hdf5_interface is when you know you have exactly one HDF5 file in your
 !! application, if true it closes ALL files, even those invoked directly from HDF5.
 
-integer, intent(out), optional :: ierr
 logical, intent(in), optional :: close_hdf5_interface
 ```
 
-To avoid memory leaks or corrupted files, always "finalize" all hDF5 files before STOPping the Fortran program.
+To avoid memory leaks or corrupted files, always "close" files before Stopping the Fortran program.
+
+## Flush data to disk while file is open
 
 ```fortran
-call h%flush(ierr)
-!! request operating system flush data to disk.
-!! The operating system can do this when it desires, which might be a while.
-integer, intent(out), optional :: ierr
+call h%flush()
 ```
 
 ## Disk variable (dataset) inquiry
@@ -58,29 +97,72 @@ integer, intent(out), optional :: ierr
 To allocate variables before reading data, inquire about dataset characteristics with these procedures.
 
 ```fortran
-rank = h%ndims(dataset_name)
+rank = h%ndim(dataset_name)
 
 character(*), intent(in) :: dataset_name
 ```
 
+Get disk dataset shape (1D vector)
+
 ```fortran
-call h%shape(dataset_name, dims, ierr)
+call h%shape(dataset_name, dims)
+
 character(*), intent(in) :: dataset_name
 integer(HSIZE_T), intent(out), allocatable :: dims(:)
-integer, intent(out), optional :: ierr
 ```
 
+Get attribute shape (1D vector)
+
 ```fortran
-exists = h%exist(dname)
-!! does dataset "dname" exist in this file
+call h%shape(dataset_name, dims, attr_name)
+
+character(*), intent(in) :: dataset_name, attr_name
+integer(HSIZE_T), intent(out), allocatable :: dims(:)
+```
+
+Dataset "dname" data class (i.e. integer, float, string, ...)
+
+```fortran
+integer :: class
+!! H5T_INTEGER_F, H5T_FLOAT_F, H5T_STRING_F
+class = h%class(dname)
 character(*), intent(in) :: dname
 ```
+
+Dataset "dname" datatype
+
+```fortran
+integer(HID_T) :: dtype
+!! H5T_NATIVE_REAL, H5T_NATIVE_DOUBLE, H5T_NATIVE_INTEGER, H5T_NATIVE_CHARACTER, H5T_STD_I64LE
+dtype = h%dtype(dname)
+character(*), intent(in) :: dname
+```
+
+Does dataset "dname" exist in this HDF5 file?
+
+```fortran
+tf = h%exist(dname)
+
+character(*), intent(in) :: dname
+```
+
+Does attribute "attr" exist for object "obj" in this file?
+
+```fortran
+tf = h%exist_attr(obj, attr)
+
+character(*), intent(in) :: obj, attr
+```
+
+Is dataset "dname" contiguous on disk?
 
 ```fortran
 tf = h%is_contig(dname)
-!! is dataset contiguous
+
 character(*), intent(in) :: dname
 ```
+
+Is dataset compact (< 64K)
 
 ```fortran
 tf = h%is_compact(dname)
@@ -88,11 +170,15 @@ tf = h%is_compact(dname)
 character(*), intent(in) :: dname
 ```
 
+Is dataset chunked?
+
 ```fortran
 tf = h%is_chunked(dname)
 !! is dataset chunked
 character(*), intent(in) :: dname
 ```
+
+Is this an HDF5 file?
 
 ```fortran
 use h5fortran, only: is_hdf5
@@ -111,8 +197,9 @@ character(*), intent(in) :: dname
 
 ```fortran
 call h%chunks(dname, chunk_size)
+
 character(*), intent(in) :: dname
-integer(hsize_t), intent(out) :: chunk_size(:)
+integer, intent(out) :: chunk_size(:)
 ```
 
 ## create dataset softlink
@@ -128,38 +215,64 @@ character(*), intent(in) :: target, &  !< target path to link dataset
 ## file write operations
 
 ```fortran
-call h%write(dname,value, ierr, chunk_size, istart, iend, stride, compact)
+call h % write(dname, A, chunk_size, istart, iend, stride, compact, datatype)
 !! write 0d..7d dataset
 character(*), intent(in) :: dname
-class(*), intent(in) :: value(:)  !< array to write
-integer, intent(in), optional :: chunk_size(1)
+class(*), intent(in) :: A(:)  !< array to write
+integer, intent(in), optional :: chunk_size(rank(A))
 integer, intent(in), optional, dimension(:) :: istart, iend, stride  !< array slicing
 logical, intent(in), optional :: compact  !< faster I/O for sub-64 kB datasets
-integer, intent(out), optional :: ierr  !< 0 if OK
+integer, intent(in), optional :: datatype  !< HDF5 datatype
 ```
 
-While the generic `%write()` method above works for all supported types and ranks, it's also possible to specify the desired type to write.
-The user may desire this to be more explicit about the data type intended for disk writes.
-The optional arguments are the same as above; we give basic examples here:
+The "datatype" parameter is optional and defaults to the native type of the input array A.
+Rather than implicitly cast with array temporaries in end-user code, which can be slow and trigger memory issues or compiler bugs (like GCC 9.5.0), instead use the "datatype" parameter to specify the HDF5 datatype explicitly.
+For example, if the data in memory is real64, but it's desired to write real32 to disk to save disk space, do like:
 
 ```fortran
-call h%write_r32(dname, 1._real32)
+real(real64) :: darr(3,4,5)
+type(hdf5_file) :: h
 
-call h%write_r64(dname, 1._real64)
+call h % open("myfile.h5", action="w")
 
-call h%write_i32(dname, 1_int32)
-
-call h%write_i64(dname, 1_int64)
-
-call h%write_char(dname, "hello")
+call h % write("/my_3d_data", darr, datatype=H5T_NATIVE_REAL)
 ```
+
+The HDF5
+[Fortran datatypes](https://support.hdfgroup.org/documentation/hdf5/latest/group___f_h5_t.html)
+include the
+[following](https://docs.hdfgroup.org/archive/support/HDF5/doc/RM/PredefDTypes.html#F90):
+
+* H5T_NATIVE_REAL: Fortran single-precision real (typically 32-bit float unless using non-default compiler settings)
+* H5T_NATIVE_DOUBLE: Fortran double-precision real (typically 64-bit float unless using non-default compiler settings)
+* H5T_NATIVE_INTEGER: Fortran integer (typically 32-bit unless using non-default compiler settings)
+
+To be explicit about the datatype, one can use the following HDF5 datatypes:
+
+* H5T_STD_F32LE: real floating (32-bit, little-endian)
+* H5T_STD_F64LE: real floating (64-bit, little-endian)
+* H5T_STD_I32LE: integer (32-bit, little-endian)
+* H5T_STD_I64LE: integer (64-bit, little-endian)
+
+Of course, part of the beauty of HDF5 is the computer reading the HDF5 will automatically coerce the data to the native type of the host machine, so the end-user does not need to worry about this in most cases.
+
+---
+
 
 Write dataset attribute (e.g. units or instrument)
 
 ```fortran
-call h%writeattr(dname, attr, attrval, ierr)
+call h%writeattr(dname, attr, attrval)
+
 character(*), intent(in) :: dname, attr  !< dataset name, attribute name
 class(*), intent(in) :: attrval(:)  !< character, real, integer
+```
+
+Create group and write attributes
+
+```fortran
+call h % create_group("/elephants")
+call h % write_attr("/elephants", "regions", ["Asia", "Africa"])
 ```
 
 ## file read operations
@@ -167,19 +280,24 @@ class(*), intent(in) :: attrval(:)  !< character, real, integer
 Read data from disk to memory
 
 ```fortran
-call h%read(dname, value, ierr, istart, iend, stride)
+call h%read(dname, A, istart, iend, stride)
 character(*), intent(in)         :: dname
-class(*), intent(out) :: value(:)  !< read array to this ALLOCATED variable
-integer, intent(out), optional :: ierr  !< 0 if OK
+class(*), intent(out) :: A(:)  !< read array to this ALLOCATED variable
 integer, intent(in), optional, dimension(:) :: istart, iend, stride !< array slicing
 ```
 
 Read dataset attribute into memory
 
 ```fortran
-call h%readattr(dname, attr, attrval, ierr)
+call h%readattr(dname, attr, attrval)
 character(*), intent(in) :: dname, attr  !< dataset name, attribute name
 class(*), intent(out) :: attrval(:)  !< character, real, integer
+```
+
+## delete attribute
+
+```fortran
+call h%delete_attr(dname, attr)
 ```
 
 ## high level operations
@@ -190,15 +308,15 @@ The runtime penalty may be insignificant unless you call these functions many ti
 The `h5write` opens `filename` with `action='rw'` (create if not present, append if existing).
 
 ```fortran
-call h5write(filename, dname, value)
+call h5write(filename, dname, A)
 character(*), intent(in) :: filename, dname
-class(*), intent(in) :: value(:)
+class(*), intent(in) :: A(:)
 ```
 
 The `h5read` opens `filename` with `action='r'` (error if file not exist).
 
 ```fortran
-call h5read(filename, dname, value)
+call h5read(filename, dname, A)
 character(*), intent(in) :: filename, dname
-class(*), intent(out) :: value(:)
+class(*), intent(out) :: A(:)
 ```

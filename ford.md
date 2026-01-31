@@ -50,13 +50,10 @@ Uses Fortran `submodule` for clean template structure.
 This easy-to-use, thin object-oriented modern Fortran library abstracts away the messy parts of HDF5 so that you can read / write various types/ranks of data with a single command.
 In distinction from other high-level HDF5 interfaces, h5fortran works to deduplicate code, using polymorphism wherever feasible and extensive test suite.
 
-Polymorphic [API](./API.md) with read/write for types int32, real32, real64 with rank scalar (0-D) through 7-D.
-64-bit integers int64 are read/write from scalar through 3-D.
-
-as well as **character (string)**.
+Polymorphic [API](./API.md) with read/write types int32, int64, real32, real64, character with rank scalar (0-D) through 7-D.
 If you need int64, we have a working example for that: src/concepts/int64.f90 that can easily be put into the h5fortran API--just make a GitHub Issue.
 
-* HDF5 **attributes** are also supported for read/write with type character, int32, real32, real64.
+* HDF5 **attributes** are also supported for read/write types int32, int64, real32, real64, character with rank scalar (0-D) through 7-D.
 * **Array slicing on read and write** is supported, that is, reading or writing part of a disk HDF5 array into a variable matching the slice shape.
 * Mismatched datatypes are coerced as per standard Fortran rules. For example, reading a float HDF5 variable into an integer Fortran variable:  42.3 => 42
 * Zlib (deflate) compression / decompression -- h5fortran will work without Zlib, but will save/load uncompressed data only.
@@ -128,15 +125,15 @@ This is necessary to workaround techniques used by HDF5 CMake files that don't p
 Otherwise, HDF5 build failures may result due to defaulting to icl-clang.
 
 By default we use Zlib 2.x a.k.a. zlib-ng.
-If you have a problem with Zlib-ng on your system, try the unmaintained Zlib 1.x by:
+If you have a problem with Zlib-ng on your system, try Zlib 1.x by:
 
 ```sh
-cmake -B build -Dzlib_legacy=on
+cmake -B build -Dzlib_key=zlib1
 ```
 
 ## Usage
 
-The simplest [example](./Examples/) h5fortran usage is like:
+The simplest [example](./example/) h5fortran usage is like:
 
 ```fortran
 use h5fortran
@@ -156,7 +153,7 @@ if(.not. is_hdf5('golt.h5')) error stop 'golt.h5 is not an HDF5 file'
 call h5read('golt.h5', '/x', x2)
 ```
 
-For detailed [examples](./Examples/) see [Examples.md](./Examples.md).
+For detailed [examples](./example/) see [Examples.md](./Examples.md).
 
 ## Notes
 
@@ -174,6 +171,6 @@ python3 scripts/build_hdf5.py
 ### h5fortran: missing Fortran datatypes
 
 * arrays of rank > 7: prototyped in reader_nd.f90, writer_nd.f90. Fortran 2008 arrays are up to rank 15, but only recent compilers support.
-* complex64 / complex128: not natively handled in HDF5. There are performance impacts for compound datatypes. Many choose to write two datasets, one each for real and imaginary like `A_real` and `A_imag`
+* complex64 / complex128: enabled by HDF5 &ge; 2.0, but not yet implemented in h5fortran.
 * non-default character kind
 * logical / boolean: not supported natively by HDF5. h5py implements as [enum](https://docs.h5py.org/en/stable/faq.html#what-datatypes-are-supported).

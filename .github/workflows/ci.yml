@@ -1,173 +1,209 @@
 name: ci
 
 env:
-  CTEST_PARALLEL_LEVEL: 4
-  CMAKE_BUILD_PARALLEL_LEVEL: 4
-  CMAKE_BUILD_TYPE: Release
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  CTEST_NO_TESTS_ACTION: error
+  CTEST_PARALLEL_LEVEL: 0
+  CMAKE_INSTALL_PREFIX: ~/libs
+  CMAKE_PREFIX_PATH: ~/libs
+  CMAKE_GENERATOR: Ninja
 
 on:
   push:
     paths:
+      - "**.c"
+      - "**.cpp"
+      - "**.f90"
+      - "**.F90"
       - "**/CMakeLists.txt"
       - "**.cmake"
-      - "**.f90"
-      - ".github/workflows/ci.yml"
-  release:
-    types: [published]
+      - ".github/workflows/**"
+      - "!memcheck.cmake"
+      - "!coverage.cmake"
+  workflow_dispatch:
+
+# avoid wasted runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 
 jobs:
 
-  linux-static:
+  gcc-new:
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+        shared: [false]
+        gcc: [12, 13, 14]
+        include:
+        - os: ubuntu-24.04
+          shared: true
+          gcc: 14
+        - os: macos-latest
+          shared: true
+          gcc: 15
+        - os: macos-latest
+          shared: false
+          gcc: 15
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      FC: gfortran-${{ matrix.gcc }}
+
+    steps:
+    - &checkout
+      uses: actions/checkout@v6
+
+    - name: GCC (Linux)
+      if: runner.os == 'Linux'
+      run: echo "CC=gcc-${{ matrix.gcc }}" >> $GITHUB_ENV
+
+    - &pkg
+      uses: ./.github/workflows/composite-pkg
+    - &unix
+      uses: ./.github/workflows/composite-unix
+
+
+  gcc-old:
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        shared: [false]
+        gcc: [9, 10, 11]
+
+    runs-on: ubuntu-22.04
+    env:
+      CC: gcc-${{ matrix.gcc }}
+      FC: gfortran-${{ matrix.gcc }}
+
+    steps:
+    - *checkout
+
+    - name: GCC APT
+      if: matrix.gcc < 11
+      run: |
+        sudo apt update -y
+        sudo apt install -y --no-install-recommends gcc-${{ matrix.gcc }} g++-${{ matrix.gcc }} gfortran-${{ matrix.gcc }}
+
+    - *pkg
+    - *unix
+
+
+  linux-flang:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    strategy:
+      matrix:
+        llvm-version: [21]
+
+    env:
+      CC: clang-${{ matrix.llvm-version }}
+      CXX: clang++-${{ matrix.llvm-version }}
+      FC: flang-${{ matrix.llvm-version }}
+
     steps:
-    - uses: actions/checkout@v2
+    - name: Apt LLVM
+      run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ matrix.llvm-version }}
+          sudo apt-get update
+
+    - name: install Flang
+      run: sudo apt install --no-install-recommends clang-${{ matrix.llvm-version }} flang-${{ matrix.llvm-version }}
+
+    - *checkout
+
+    - name: CMake build & test
+      run: cmake --workflow nofind
+
+
+# not a meaningful need for this in a pure fortran program
+  valgrind-memory:
+    if: false
+    runs-on: ubuntu-latest
+    needs: gcc-new
+    timeout-minutes: 10
+
+    steps:
+
+    - name: install valgrind
+      run: |
+        sudo apt update
+        sudo apt install --no-install-recommends valgrind libhdf5-dev
+
+    - *checkout
+
+    - run: ctest -Dexclude_label="deflate|python" -S memcheck.cmake -VV
+
+
+# issue with python loading writer.inc
+  linux-coverage:
+    if: false
+    needs: gcc-new
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - *checkout
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.x'
 
     - name: install hdf5
       run: |
-        sudo apt update -yq
-        sudo apt install -yq --no-install-recommends ninja-build libhdf5-dev
+        sudo apt update
+        sudo apt install --no-install-recommends libhdf5-dev
 
-    - run: cmake --preset multi --install-prefix=${HOME}
-    - run: cmake --build --preset debug
-    - run: ctest --preset debug --output-junit test-debug.xml
+    - name: install Gcovr
+      run: pip install gcovr
 
-    - run: cmake --build --preset release
-    - run: ctest --preset release --output-junit test-release.xml
+    - run: cmake --preset coverage
+    - run: cmake --build --parallel --preset coverage
 
-    - name: Publish Unit Test Results
-      uses: EnricoMi/publish-unit-test-result-action@v1
-      if: always()
+    - name: Code coverage
+      run: cmake --build --parallel --preset run-coverage
+
+    - uses: actions/upload-artifact@v6
       with:
-        files: build/test-*.xml
-
-    - run: cmake --install build
-
-    - name: configure examples
-      run: cmake -S Examples -B Examples/build -Dh5fortran_ROOT=~
-    - name: build examples
-      run: cmake --build Examples/build
-    - name: Test examples
-      run: ctest --test-dir Examples/build --output-on-failure
-
-    - name: create package
-      if: github.event.action == 'published'
-      run: cpack --config build/CPackConfig.cmake
-
-    - name: Upload artifact
-      if: github.event.action == 'published'
-      uses: actions/upload-artifact@v1
-      with:
-        name: binary-archive
-        path: build/package
-
-    - name: get version
-      if: github.event.action == 'published'
-      id: get_version
-      run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\/v/}
-
-    - name: Upload release asset
-      if: github.event.action == 'published'
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: build/package/h5fortran-${{ steps.get_version.outputs.VERSION }}-Linux.tar.zst
-        asset_name:  h5fortran-${{ steps.get_version.outputs.VERSION }}-Linux.tar.zst
-        asset_content_type: application/zip
+        name: coverage-report-html
+        path: build-coverage/coverage/
 
 
-  linux-shared:
+  cmake-older:
+    timeout-minutes: 30
+
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        cmake_version: ["3.20.6"]
 
     steps:
-    - uses: actions/checkout@v2
 
-    - name: install hdf5
+    - *checkout
+
+    - name: prereqs
       run: |
-        sudo apt update -yq
-        sudo apt install -yq --no-install-recommends ninja-build libhdf5-dev
+        sudo apt-get update
+        sudo apt install --no-install-recommends libhdf5-dev
 
-    - run: cmake --preset multi -DBUILD_SHARED_LIBS:BOOL=true --install-prefix=${HOME}
-    - run: cmake --build --preset debug
-    - run: ctest --preset debug --output-junit test-debug.xml
+    - uses: ./.github/workflows/composite-cmake
 
-    - run: cmake --build --preset release
-    - run: ctest --preset release --output-junit test-release.xml
+    - name: configure
+      run: $CMAKE -Bbuild -DCMAKE_INSTALL_PREFIX:PATH=$(pwd)/build/local
 
-    - name: Publish Unit Test Results
-      uses: EnricoMi/publish-unit-test-result-action@v1
-      if: always()
-      with:
-        files: build/test-*.xml
+    - name: build
+      run: $CMAKE --build build
 
-    - run: cmake --install build
+    - name: test
+      run: $CTEST --test-dir build
 
-    - name: configure examples
-      run: cmake -S Examples -B Examples/build -Dh5fortran_ROOT=~
-    - name: build examples
-      run: cmake --build Examples/build
-    - name: Test examples
-      run: ctest --test-dir Examples/build -V
-
-
-  linux-build-static:
-    needs: linux-static
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-    - uses: actions/checkout@v2
-
-    - run: cmake -B build --preset build --install-prefix=${HOME}
-    - run: cmake --build build
-    - run: ctest --test-dir build --preset default
-    - run: cmake --install build
-
-    - name: configure examples
-      run: cmake -S Examples -B Examples/build -Dh5fortran_ROOT=~
-    - name: build Examples
-      run: cmake --build Examples/build
-    - name: Test Examples
-      run: ctest --test-dir Examples/build -V
-
-  linux-build-shared:
-    needs: [linux-shared, linux-build-static]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-    - uses: actions/checkout@v2
-
-    - run: cmake -B build --preset build -DBUILD_SHARED_LIBS:BOOL=true --install-prefix=${HOME}
-    - run: cmake --build build
-    - run: ctest --test-dir build --preset default
-    - run: cmake --install build
-
-    - name: configure examples
-      run: cmake -S Examples -B Examples/build -Dh5fortran_ROOT=~
-    - name: build Examples
-      run: cmake --build Examples/build
-    - name: Test Examples
-      run: ctest --test-dir Examples/build -V
-
-
-  linux-gcc7:
-      runs-on: ubuntu-18.04
-      timeout-minutes: 15
-
-      steps:
-      - uses: actions/checkout@v2
-
-      - name: install libs
-        run: |
-          sudo apt update -yq
-          sudo apt install -yq --no-install-recommends gfortran libhdf5-dev
-
-      - run: cmake -B build
-      - run: cmake --build build
-      - run: ctest --test-dir build --preset default
+    - name: install package
+      run: $CMAKE --install build

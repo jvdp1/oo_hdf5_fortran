@@ -1,0 +1,37 @@
+name: "build-test-install-example"
+
+runs:
+
+  using: "composite"
+
+  steps:
+
+  - name: Configure
+    shell: bash
+    run: >-
+      cmake --preset multi
+      -DBUILD_SHARED_LIBS:BOOL=${{ matrix.shared }}
+
+  - name: Build / test Debug
+    shell: bash
+    run: cmake --workflow debug
+
+  - name: Build Release
+    shell: bash
+    run: cmake --workflow release
+
+  - name: install package
+    shell: bash
+    run: cmake --install build
+
+  - name: example workflow
+    shell: bash
+    run: cmake -S example -B example/build
+
+  - name: Build examples
+    shell: bash
+    run: cmake --build example/build
+
+  - name: Test examples
+    shell: bash
+    run: ctest --test-dir example/build -V
